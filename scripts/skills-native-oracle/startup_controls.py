@@ -1,6 +1,7 @@
 """Bounded native startup side-effect controls for approved target behavior."""
 import json
 import os
+import re
 import shutil
 import tomllib
 
@@ -80,9 +81,9 @@ def _private_file(record, path, *, exact_bytes=None, allow_empty=False):
     row = _row(record, path, "file")
     private(record, path)
     raw = record["filesystem"]["raw_file_hashes"].get(path)
-    assert raw is not None and len(raw["sha256"]) == 64, f"raw hash missing: {path}"
+    assert isinstance(raw, dict) and isinstance(raw.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", raw["sha256"]), f"invalid raw hash: {path}"
     assert row["value"] == raw["sha256"], f"startup row/raw hash mismatch: {path}"
-    assert raw["bytes"] >= (0 if allow_empty else 1), f"empty startup file: {path}"
+    assert type(raw.get("bytes")) is int and raw["bytes"] >= (0 if allow_empty else 1), f"empty/invalid startup file size: {path}"
     if exact_bytes is not None:
         assert raw["bytes"] == exact_bytes, f"unexpected byte count for {path}"
 

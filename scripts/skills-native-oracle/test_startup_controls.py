@@ -2,9 +2,11 @@
 from copy import deepcopy
 import hashlib
 import json
+import ntpath
 import os
 from pathlib import Path
 import tempfile
+import struct
 import unittest
 from unittest.mock import patch
 
@@ -25,9 +27,35 @@ def add_file(record, path, content, mode=0o600):
 
 def synthetic_acl():
     user = "S-1-5-21-100-200-300-1000"
-    return {"owner_sid": user, "user_sid": user, "dacl_present": True, "control_flags": 4,
+    row = {"owner_sid": user, "user_sid": user, "dacl_present": True, "control_flags": 0x8004,
             "aces": [{"type": 0, "flags": 0, "mask": 0x1f01ff, "sid": sid}
                      for sid in (user, "S-1-5-18", "S-1-5-32-544")]}
+    seal_descriptor(row)
+    return row
+
+
+def seal_descriptor(row):
+    """Synthetic Windows binary grammar control, never native execution."""
+    def sid(value):
+        fields = [int(part) for part in value.split('-')[1:]]
+        revision, authority, *parts = fields
+        return bytes((revision, len(parts))) + authority.to_bytes(6, 'big') + struct.pack(f'<{len(parts)}I', *parts)
+    owner = sid(row['owner_sid'])
+    aces = []
+    for ace in row['aces']:
+        identity = sid(ace['sid'])
+        aces.append(struct.pack('<BBHi', ace['type'], ace['flags'], 8 + len(identity), ace['mask']) + identity)
+    acl = struct.pack('<BBHHH', 2, 0, 8 + sum(map(len, aces)), len(aces), 0) + b''.join(aces)
+    row['descriptor_hex'] = (struct.pack('<BBHIIII', 1, 0, row['control_flags'], 20, 0, 0, 20 + len(owner)) + owner + acl).hex()
+
+
+def attach_synthetic_privacy(record):
+    root = 'C:\\synthetic-owned'
+    entries = {path: dict(synthetic_acl(), path=ntpath.join(root, *path.split('/'))) for path in sorted(record['filesystem']['files'])}
+    record['cwd'] = ntpath.join(root, 'project')
+    record['startup_privacy'] = {'source_class': 'synthetic policy record', 'root': root,
+        'paths': sorted(entries), 'mechanism': 'windows-native-owner-dacl', 'exit': 0, 'stderr_hex': '',
+        'stdout_hex': json.dumps(list(entries.values())).encode().hex(), 'entries': entries}
 
 
 def synthetic_pair(parse_error=False, skills=True):
@@ -60,14 +88,26 @@ def synthetic_pair(parse_error=False, skills=True):
         add_file(go, "data/symbrain/recipes/skills-native-764.jsonl", b"synthetic episode\n")
     if os.name == "nt":
         for record in (go, rust):
-            # Synthetic branch inputs only, not a native probe or identity.
-            record["startup_privacy"] = {"source_class": "synthetic policy record",
-                "mechanism": "windows-native-owner-dacl", "exit": 0, "stderr_hex": "",
-                "entries": {path: synthetic_acl() for path in record["filesystem"]["files"]}}
+            attach_synthetic_privacy(record)
     return go, rust
 
 
 class OrdinaryStartupTest(unittest.TestCase):
+    def test_coordinated_hash_and_byte_type_mutations_fail_entrypoint(self):
+        for mutation in ('nonhex', 'uppercase', 'boolean-bytes', 'string-bytes', 'negative-bytes'):
+            with self.subTest(mutation=mutation):
+                go, rust = synthetic_pair()
+                root = Path('.')
+                self.assertTrue(compare_pair({'id': 'mcp-ordinary', 'mcp': True, 'go': go, 'rust': rust}, root))
+                raw = go['filesystem']['raw_file_hashes'][MEMORY_KEY]
+                if mutation in ('nonhex', 'uppercase'):
+                    value = 'z' * 64 if mutation == 'nonhex' else 'A' * 64
+                    raw['sha256'] = go['filesystem']['files'][MEMORY_KEY]['value'] = value
+                else:
+                    raw['bytes'] = {'boolean-bytes': True, 'string-bytes': '65', 'negative-bytes': -1}[mutation]
+                with self.assertRaises(AssertionError):
+                    compare_pair({'id': 'mcp-ordinary', 'mcp': True, 'go': go, 'rust': rust}, root)
+
     def test_ordinary_entrypoint_classifies_without_mutating_raw_records(self):
         for parse_error, skills in ((False, True), (True, True), (False, False)):
             with self.subTest(parse_error=parse_error, skills=skills):
@@ -172,6 +212,36 @@ class OrdinaryStartupTest(unittest.TestCase):
 
 
 class WindowsPrivacyStructureTest(unittest.TestCase):
+    def test_raw_descriptor_path_and_claim_mutations_fail_entrypoint(self):
+        root = Path('.')
+        for mutation in ('raw-stdout', 'claims-only', 'truncated', 'nonhex', 'missing', 'path', 'deny-before-allow'):
+            with self.subTest(mutation=mutation):
+                go, rust = synthetic_pair()
+                for record in (go, rust):
+                    attach_synthetic_privacy(record)
+                with patch('startup_privacy.os.name', 'nt'):
+                    pair_row = {'id': 'mcp-ordinary', 'mcp': True, 'go': go, 'rust': rust}
+                    self.assertTrue(compare_pair(pair_row, root))
+                    proof = go['startup_privacy']
+                    row = proof['entries'][MEMORY_KEY]
+                    if mutation == 'raw-stdout':
+                        proof['stdout_hex'] = b'{}'.hex()
+                    elif mutation == 'claims-only':
+                        row['owner_sid'] = 'S-1-5-18'
+                    elif mutation == 'missing':
+                        row.pop('descriptor_hex')
+                    elif mutation in ('truncated', 'nonhex'):
+                        row['descriptor_hex'] = '00' if mutation == 'truncated' else 'zz'
+                    elif mutation == 'path':
+                        row['path'] = 'C:\\outside\\key'
+                    else:
+                        row['aces'].insert(0, {'type': 1, 'flags': 0, 'mask': 1, 'sid': row['user_sid']})
+                        seal_descriptor(row)
+                    if mutation not in ('raw-stdout', 'claims-only'):
+                        proof['stdout_hex'] = json.dumps([proof['entries'][path] for path in proof['paths']]).encode().hex()
+                    with self.assertRaises((AssertionError, KeyError)):
+                        compare_pair(pair_row, root)
+
     def acl(self):
         return synthetic_acl()
 
@@ -186,6 +256,7 @@ class WindowsPrivacyStructureTest(unittest.TestCase):
             ("inherit-only-users", lambda row: row["aces"].append({"type": 0, "flags": 8, "mask": 1, "sid": "S-1-5-32-545"})),
             ("unknown-ace", lambda row: row["aces"][0].update(type=9)),
             ("owner-denied-only", lambda row: row["aces"][0].update(type=1)),
+            ("owner-deny-before-allow", lambda row: row["aces"].insert(0, {"type": 1, "flags": 0, "mask": 1, "sid": row['user_sid']})),
             ("owner-inherit-only", lambda row: row["aces"][0].update(flags=8)),
         ]
         for name, mutation in mutations:
@@ -193,6 +264,7 @@ class WindowsPrivacyStructureTest(unittest.TestCase):
                 row = self.acl()
                 validate_windows(row)
                 mutation(row)
+                seal_descriptor(row)
                 with self.assertRaises(AssertionError):
                     validate_windows(row)
 
@@ -201,11 +273,10 @@ class WindowsPrivacyStructureTest(unittest.TestCase):
         with patch("startup_privacy.os.name", "nt"):
             with self.assertRaisesRegex(AssertionError, "native ACL"):
                 private(record, "owned")
-            record["startup_privacy"] = {"mechanism": "windows-native-owner-dacl", "exit": 0,
-                                         "stderr_hex": "", "entries": {"owned": self.acl()}}
+            attach_synthetic_privacy(record)
             private(record, "owned")
             record["startup_privacy"]["entries"]["owned"]["owner_sid"] = "S-1-5-18"
-            with self.assertRaisesRegex(AssertionError, "owner"):
+            with self.assertRaisesRegex(AssertionError, "raw ACL/entry"):
                 private(record, "owned")
 
 
