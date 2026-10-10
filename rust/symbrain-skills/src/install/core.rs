@@ -205,7 +205,13 @@ fn install_materialized(
             replace_tree(
                 &materialized.root,
                 &stable,
-                if options.allow_executable { 0o777 } else { 0 },
+                // An explicit render retains original modes until the
+                // installer records mode_changes and strips executable bits.
+                if options.render_dir.is_some() || options.allow_executable {
+                    0o777
+                } else {
+                    0
+                },
                 options.fault,
             )?;
             after_publication()?;
@@ -332,6 +338,16 @@ mod tests {
             "---\nname: demo\ndescription: fixture\n---\nbody\n",
         )
         .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(source.join("script.sh"), b"fixture, never executed\n").unwrap();
+            std::fs::set_permissions(
+                source.join("script.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
         let bundle = crate::load_bundle(&source).unwrap();
         let rendered =
             crate::render_target(&bundle, "opencode", &crate::RenderMetadata::default()).unwrap();
@@ -349,7 +365,21 @@ mod tests {
         assert!(!planned.path.exists());
         options.dry_run = false;
         let installed = install_rendered(&bundle, &rendered, &options).unwrap();
+        assert_eq!(installed.mode_changes, planned.mode_changes);
         let tree = retained.join("opencode/demo");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(installed.mode_changes.len(), 1);
+            assert_eq!(installed.mode_changes[0].from, "0755");
+            assert_eq!(installed.mode_changes[0].to, "0644");
+            for path in [tree.join("script.sh"), installed.path.join("script.sh")] {
+                assert_eq!(
+                    std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    0o644
+                );
+            }
+        }
         assert_eq!(
             std::fs::read(tree.join("SKILL.md")).unwrap(),
             rendered.skill_md
