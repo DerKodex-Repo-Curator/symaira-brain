@@ -77,6 +77,21 @@ pub fn materialize(
     materialize_inner(bundle, rendered, output_root, None, None)
 }
 
+// Applying installs publish an already frozen staging tree and must retain
+// the same renderer lock through source-marker writes and rollback as well.
+pub(crate) fn lock_render_tree(
+    output_root: &Path,
+    target: &str,
+    name: &str,
+) -> Result<std::fs::File, SkillError> {
+    validate_component(target, "target")?;
+    validate_component(name, "skill name")?;
+    let root = open_root(output_root).map_err(|error| io_error(&error))?;
+    let parent = Path::new(target);
+    ensure_dir(&root, parent).map_err(|error| io_error(&error))?;
+    lock_destination(&root, parent, &parent.join(name)).map_err(|error| io_error(&error))
+}
+
 /// Materializes a rendered skill while injecting one deterministic I/O fault.
 ///
 /// This narrow seam is intended for rollback regression tests. Passing `None`
