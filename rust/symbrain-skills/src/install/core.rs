@@ -35,14 +35,15 @@ pub struct InstallOptions {
     pub legacy_project_base: bool,
     /// Optional replacement for the default base snapshot root.
     pub base_dir: Option<PathBuf>,
-    /// Render root the installed symlink must point into.
+    /// Retained render root for applying installs in either mode.
     ///
     /// Go's runner renders through `render.RenderAll(bundle, opts.RenderDir,
     /// [target])` and then installs a symlink at `item.Path`, i.e.
     /// `<RenderDir>/<target>/<name>` — flat, with no scope or identity segment.
-    /// When set, the stable tree is written there and the symlink points at it;
-    /// when unset the per-user cache is used, which is what direct install
-    /// callers without a runner have always done.
+    /// When set, the stable tree is written there; a symlink points at it and
+    /// a copy records that same retained source path in its marker.
+    /// When unset, symlinks use the per-user cache and copies use temporary
+    /// staging, preserving direct callers' existing behavior.
     pub render_dir: Option<PathBuf>,
     /// `copy` (default) or managed `symlink`.
     pub mode: String,
@@ -156,10 +157,9 @@ fn install_rendered_inner(
     let output = tempfile::tempdir()
         .map_err(|error| SkillError(format!("create install staging root: {error}")))?;
     let materialized = materialize(bundle, rendered, output.path())?;
-    // A symlink must outlive the temporary materialization. Keep the rendered
-    // tree under a stable per-user cache for that mode; copies can use the
-    // private staging root and remain fully transactional.
-    if effective_mode(options) == "symlink" && !options.dry_run {
+    // Applying callers with an explicit render root retain the source in both
+    // modes. Direct copy callers without a root keep private staging only.
+    if (effective_mode(options) == "symlink" || options.render_dir.is_some()) && !options.dry_run {
         // Validate the destination before changing the cache. A rejected
         // unmanaged collision must not refresh or replace the cache tree.
         preflight_destination(&rendered.target, &rendered.name, options)?;
@@ -182,12 +182,18 @@ fn install_rendered_inner(
         // both succeed. The install lock also serializes other processes.
         let cache_backup = backup_existing(&stable, None)?;
         let operation = (|| {
-            replace_tree(
-                &materialized.root,
-                &stable,
-                if options.allow_executable { 0o777 } else { 0 },
-                options.fault,
-            )?;
+            if let Some(render_dir) = options.render_dir.as_deref() {
+                // Use the existing rooted renderer, including its marker and
+                // render lock, rather than only copying a temporary tree.
+                materialize(bundle, rendered, render_dir)?;
+            } else {
+                replace_tree(
+                    &materialized.root,
+                    &stable,
+                    if options.allow_executable { 0o777 } else { 0 },
+                    options.fault,
+                )?;
+            }
             install_target_inner_locked(
                 &rendered.target,
                 &stable,
@@ -219,4 +225,51 @@ fn install_rendered_inner(
         &materialized.source_hash,
         options,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_copy_render_root_is_retained_but_dry_run_does_not_publish() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(
+            source.join("SKILL.md"),
+            "---\nname: demo\ndescription: fixture\n---\nbody\n",
+        )
+        .unwrap();
+        let bundle = crate::load_bundle(&source).unwrap();
+        let rendered =
+            crate::render_target(&bundle, "opencode", &crate::RenderMetadata::default()).unwrap();
+        let retained = temp.path().join("retained");
+        let mut options = InstallOptions {
+            home_dir: temp.path().join("home"),
+            render_dir: Some(retained.clone()),
+            mode: "copy".into(),
+            dry_run: true,
+            ..Default::default()
+        };
+        let planned = install_rendered(&bundle, &rendered, &options).unwrap();
+        assert_eq!(planned.action, "planned");
+        assert!(!retained.exists());
+        assert!(!planned.path.exists());
+        options.dry_run = false;
+        let installed = install_rendered(&bundle, &rendered, &options).unwrap();
+        let tree = retained.join("opencode/demo");
+        assert_eq!(
+            std::fs::read(tree.join("SKILL.md")).unwrap(),
+            rendered.skill_md
+        );
+        let marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(installed.path.join(".symskills.json")).unwrap())
+                .unwrap();
+        assert_eq!(marker["rendered_at"], tree.to_string_lossy().as_ref());
+        assert_eq!(
+            std::fs::read(tree.join(".symskills.json")).unwrap(),
+            std::fs::read(installed.path.join(".symskills.json")).unwrap()
+        );
+    }
 }
