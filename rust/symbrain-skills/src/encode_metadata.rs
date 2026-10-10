@@ -2,7 +2,7 @@
 // Copyright (c) 2011-2019 Canonical Ltd. Apache-2.0, see repository LICENSE.
 use std::cmp::Ordering;
 
-use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
+use serde::ser::{Error, Serialize, SerializeMap, SerializeSeq, Serializer};
 use serde_json::Value;
 
 #[path = "yaml_key_ranges.rs"]
@@ -36,6 +36,24 @@ impl Serialize for Metadata<'_> {
                     output.serialize_element(&Metadata(item))?;
                 }
                 output.end()
+            }
+            Value::Number(number) => {
+                // CLI dependency feature unification can enable JSON arbitrary
+                // precision. Serialize numeric primitives, never its private
+                // struct representation, through the existing YAML encoder.
+                if let Some(value) = number.as_i64() {
+                    serializer.serialize_i64(value)
+                } else if let Some(value) = number.as_u64() {
+                    serializer.serialize_u64(value)
+                } else {
+                    let value = number
+                        .as_f64()
+                        .filter(|value| value.is_finite())
+                        .ok_or_else(|| {
+                            S::Error::custom("metadata number is outside finite f64 range")
+                        })?;
+                    serializer.serialize_f64(value)
+                }
             }
             value => value.serialize(serializer),
         }
