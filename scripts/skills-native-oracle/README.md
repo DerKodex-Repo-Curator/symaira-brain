@@ -137,3 +137,20 @@ The workflow has a bounded 90-minute job budget because the previous 45-minute
 budget cancelled Linux and Windows collection. Twenty-second individual process
 deadlines, every declared case, negative controls, and mismatch failures remain
 unchanged. The native inventories remain 1,112 Unix and 1,070 Windows cases.
+
+## Deterministic owned Git stat fixtures
+
+`copytree` changes file inode/ctime, which Git normally refreshes into its raw
+index. Two unchanged frozen-Go restore dry-runs consequently produce different
+index hashes even though the complete tool result agrees. These owned fixtures
+set Git's supported `core.trustctime=false` and `core.checkstat=minimal` through
+their isolated environment and prime the real index after fixed timestamps,
+before retaining the seed. Ordinary Git diff refresh remains enabled: disabling
+`diff.autoRefreshIndex` falsely adds unchanged files to `changed_files`.
+
+The environment is identical for both actual binaries, and only belongs to
+owned fixtures. No production Git settings, frozen Go source, historical raw
+observations, input case inventory, filesystem/hash comparator or assertions
+are changed. `test_git_fixture.py` executes real Git over two freshly cloned
+fixtures, requires exact unchanged index bytes, and verifies genuine source
+changes are still detected. Full native and independent review remain required.
