@@ -67,13 +67,15 @@ fn check(input_bytes: &str, expected_bytes: &str) -> Result<usize, String> {
     let inputs: Vec<Input> = input_bytes
         .split('\n')
         .filter(|s| !s.is_empty())
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()
+        .map_err(|error| format!("input schema: {error}"))?;
     let expected: Vec<Expected> = expected_bytes
         .split('\n')
         .filter(|s| !s.is_empty())
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()
+        .map_err(|error| format!("expected schema: {error}"))?;
     if inputs.len() != 38 || expected.len() != 38 {
         return Err("case inventory".into());
     }
@@ -159,4 +161,52 @@ fn actual_go_38_typed_control_documents_and_changed_expectation_rejection() {
             .unwrap_err()
             .starts_with("document bytes body-empty")
     );
+}
+
+#[test]
+fn document_validator_rejects_zero_false_missing_count_and_type_mutations() {
+    let input = include_str!("../tests/fixtures/yaml835-documents-input.jsonl");
+    let expected = include_str!("../tests/fixtures/yaml835-documents-go.jsonl");
+    let original: Vec<Value> = expected
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(check(input, "").unwrap_err(), "case inventory");
+    for mutation in [
+        "false",
+        "missing",
+        "count",
+        "input-kind",
+        "parsed-bits",
+        "duplicate-id",
+    ] {
+        let mut rows = original.clone();
+        match mutation {
+            "false" => rows[0]["parse_error"] = Value::Bool(false),
+            "missing" => {
+                rows[0].as_object_mut().unwrap().remove("frontmatter");
+            }
+            "count" => {
+                rows.pop();
+            }
+            "input-kind" => {
+                rows[28]["input_number_types"]["/metadata/values/1"] = Value::String("i64".into());
+            }
+            "parsed-bits" => {
+                rows[28]["parsed_number_types"]["/metadata/values/1"] =
+                    Value::String("f64:8000000000000000".into());
+            }
+            "duplicate-id" => rows[1]["id"] = rows[0]["id"].clone(),
+            _ => unreachable!(),
+        }
+        let changed = rows
+            .iter()
+            .map(|row| serde_json::to_string(row).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            check(input, &changed).is_err(),
+            "actual checker accepted {mutation}"
+        );
+    }
 }

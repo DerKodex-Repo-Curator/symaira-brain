@@ -279,6 +279,10 @@ include!("materialize_manifest.rs");
 include!("materialize_fs.rs");
 include!("comparison_cache.rs");
 
+#[cfg(all(test, windows))]
+#[path = "materialize_lock_windows_tests.rs"]
+mod materialize_lock_windows_tests;
+
 #[cfg(test)]
 #[path = "comparison_cache_tests.rs"]
 mod comparison_cache_tests;

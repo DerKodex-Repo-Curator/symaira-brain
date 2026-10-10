@@ -113,7 +113,11 @@ fn run_process(command: &mut std::process::Command, input: &[u8]) -> Output {
 fn audit_environment_override_does_not_bypass_config_validation() {
     let cases = [
         ("malformed-toml", "[audit\n", "failed to parse"),
-        ("invalid-value", "[audit]\nenabled = \"yes\"\n", "audit.enabled"),
+        (
+            "invalid-value",
+            "[audit]\nenabled = \"yes\"\n",
+            "audit.enabled",
+        ),
         ("invalid-type", "[audit]\nenabled = []\n", "audit.enabled"),
     ];
     for (case, contents, expected) in cases {
@@ -129,10 +133,8 @@ fn audit_environment_override_does_not_bypass_config_validation() {
                     format!("[profile]\nname = \"isolated\"\n[audit]\nenabled = {profile_audit}\n[servers.memory]\nenabled = false\n"),
                 )
                 .unwrap();
-                let mut process = super::command(
-                    &root,
-                    &["mcp", "--profile-file", profile.to_str().unwrap()],
-                );
+                let mut process =
+                    super::command(&root, &["mcp", "--profile-file", profile.to_str().unwrap()]);
                 process.env("SYMBRAIN_AUDIT_ENABLED", audit_override);
                 let output = run_process(&mut process, b"");
                 assert_eq!(output.status.code(), Some(2), "{case}: {output:?}");
@@ -172,10 +174,8 @@ fn audit_environment_override_applies_after_valid_or_missing_config() {
         )
         .unwrap();
         for value in ["true", "invalid"] {
-            let mut process = super::command(
-                &root,
-                &["mcp", "--profile-file", profile.to_str().unwrap()],
-            );
+            let mut process =
+                super::command(&root, &["mcp", "--profile-file", profile.to_str().unwrap()]);
             process.env("SYMBRAIN_AUDIT_ENABLED", value);
             let output = run_process(&mut process, b"");
             assert_eq!(

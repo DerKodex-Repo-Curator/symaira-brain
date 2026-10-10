@@ -9,6 +9,9 @@ use symbrain_skills::{RenderMetadata, load_bundle, render_target};
 #[path = "support/skills_status_cache.rs"]
 mod skills_status_cache;
 
+#[path = "support/skills_render_lock.rs"]
+mod skills_render_lock;
+
 #[test]
 fn explicit_target_reports_render_drift_without_a_go_fallback() {
     let oracle = std::env::var_os("SYMBRAIN_SKILLS_STATUS_GO_ORACLE");
