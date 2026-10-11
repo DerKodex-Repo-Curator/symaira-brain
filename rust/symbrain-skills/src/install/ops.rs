@@ -241,6 +241,22 @@ pub(crate) fn install_target_inner_locked(
         if mode == "symlink" {
             install_symlink(source, &destination, &marker_bytes, options.fault)?;
         } else {
+            if options
+                .render_dir
+                .as_ref()
+                .is_some_and(|root| root.join(target).join(name) == source)
+            {
+                // Go records the managed marker in the retained render before
+                // copying it. Never write into an unrelated direct-copy source.
+                let root = replace::open_trusted_dir(source)?;
+                replace::write_bytes(
+                    &root,
+                    Path::new(MARKER_FILE),
+                    &marker_bytes,
+                    0o644,
+                    options.fault,
+                )?;
+            }
             install_copy_tree(source, &destination, &marker_bytes, options)?;
         }
         write_snapshot_for_scope_locked(

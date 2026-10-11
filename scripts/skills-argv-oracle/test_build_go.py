@@ -1,10 +1,16 @@
 """Real Git-tree controls for the fixed Skills oracle's source admission."""
+from contextlib import ExitStack
 import importlib.util
+import json
 import os
 from pathlib import Path
+import platform
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 
@@ -110,6 +116,147 @@ class SourceAdmission(unittest.TestCase):
             self.preparation(download)
         self.assertEqual(self.report["module_cache_preparation"]["status"], "started")
         self.assertNotIn("source_after_cache_preparation", self.report)
+
+
+class BuildOnlyWorkflow(unittest.TestCase):
+    """Exercise the actual workflow program, stopping before any SDK command.
+
+    Mocked runner names test routing only, never foreign native execution.
+    The real parser writes only failed, explicitly uncompiled test receipts.
+    """
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="skills-build-only-control-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.workflow = (BUILDER.ROOT / ".github/workflows/skills-native.yml").read_text()
+        step = self.workflow.split("      - name: Produce corrected reference build only\n")
+        self.assertEqual(len(step), 2)
+        program = step[1].split("        run: |\n", 1)[1].split("      - name:", 1)[0]
+        self.program = compile(textwrap.dedent(program), "skills-native.yml:build-only", "exec")
+        self.addCleanup(signal.signal, signal.SIGTERM, signal.getsignal(signal.SIGTERM))
+
+    def execute(self, runner="ubuntu-latest", system="Linux", fetch_error=None, build_error=None):
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(os.environ, {
+                "BUILD_RUNNER": runner, "RUNNER_TEMP": str(self.root),
+                "GITHUB_RUN_ID": "unit-uncompiled", "GITHUB_RUN_ATTEMPT": "1"}))
+            stack.enter_context(mock.patch.object(platform, "system", return_value=system))
+            stack.enter_context(mock.patch.object(sys, "path", sys.path.copy()))
+            stack.enter_context(mock.patch.object(sys, "argv", sys.argv.copy()))
+            stack.enter_context(mock.patch.object(sys, "dont_write_bytecode", True))
+            stack.enter_context(mock.patch.dict(sys.modules, {"build_go": BUILDER}))
+            self.fetch = stack.enter_context(mock.patch.object(subprocess, "run", side_effect=fetch_error))
+            self.process = stack.enter_context(mock.patch.object(subprocess, "Popen", side_effect=AssertionError("no process allowed")))
+            self.build = stack.enter_context(mock.patch.object(BUILDER, "build", side_effect=build_error or RuntimeError("test boundary: no SDK executed")))
+            self.admission = stack.enter_context(mock.patch.object(BUILDER.skills_reference, "admit_receipt",
+                                                                  side_effect=AssertionError("no admission allowed")))
+            exec(self.program, {"__name__": "__main__"})
+
+    def test_workflow_routes_only_explicit_dispatch_to_build_only(self):
+        ordinary, manual = self.workflow.split("  corrected-reference-build-only:\n")
+        self.assertIn("if: github.event_name != 'workflow_dispatch'", ordinary)
+        self.assertIn("if: github.event_name == 'workflow_dispatch'", manual)
+        self.assertIn("options: [ubuntu-latest, windows-latest]", ordinary)
+        self.assertIn("os: [ubuntu-latest, macos-latest, windows-latest]", ordinary)
+        self.assertIn("inputs.build_runner || 'process'", ordinary)
+        self.assertNotIn("continue-on-error", self.workflow)
+        self.assertNotIn("strategy:", manual)
+        self.assertEqual(manual.count("        run: |"), 1)
+        self.assertIn("shell: python {0}", manual)
+        self.assertIn("cache: false", manual)
+        self.assertIn("if: always()", manual)
+        self.assertIn("if-no-files-found: error", manual)
+        self.assertIn("go-build.json", manual)
+        self.assertIn("build.*.log", manual)
+        self.assertIn("/symbrain*", manual)
+        # Existing automatic process gates are still mandatory, not success skips.
+        for command in ("go mod download", "cargo fmt --all --check", "cargo clippy --locked",
+                        "cargo test --locked", "cargo build --locked", "test_fixture_cleanup.py",
+                        "test_full_stdout.py", "test_checkpoint.py", "skills-native-oracle/run.py"):
+            self.assertIn(command, ordinary)
+        self.assertNotIn("--reference", ordinary)
+
+    def test_actual_workflow_argv_reaches_builder_but_never_comparisons(self):
+        # Two declared runner branches, with the real current-host Path semantics.
+        for index, (runner, system) in enumerate((("ubuntu-latest", "Linux"), ("windows-latest", "Windows"))):
+            with self.subTest(runner=runner):
+                self.root = self.root / str(index)
+                self.root.mkdir()
+                with self.assertRaises(SystemExit) as exited:
+                    self.execute(runner, system)
+                self.assertEqual(exited.exception.code, 1)
+                self.build.assert_called_once()
+                args, out, _ = self.build.call_args.args
+                self.assertEqual(args.reference, BUILDER.CORRECTED)
+                self.assertTrue(args.prepare_module_cache)
+                self.assertEqual(args.go_cache, out.parent / "go-cache")
+                self.assertEqual(args.module_cache, out.parent / "module-cache")
+                self.assertTrue(args.go_cache.is_dir() and args.module_cache.is_dir())
+                row = json.loads(args.receipt.read_bytes())
+                self.assertEqual(row["reference"], BUILDER.CORRECTED)
+                self.assertEqual(row["frozen"], BUILDER.source_commit(BUILDER.CORRECTED))
+                self.assertEqual(row["status"], "failed")
+                self.assertEqual(row["commands"], [])
+                self.assertIn("no SDK executed", row["error"])
+                self.assertFalse(out.exists())
+                self.assertNotIn("native_surface_gate_passed", row)
+                anchor = BUILDER.skills_reference.CORRECTED_ANCHOR
+                self.assertEqual(self.fetch.call_args.args[0],
+                                 ["git", "fetch", "--no-tags", "origin", f"{anchor}:{anchor}"])
+                self.assertTrue(self.fetch.call_args.kwargs["check"])
+                self.assertEqual(self.fetch.call_args.kwargs["timeout"], 120)
+                self.process.assert_not_called()
+
+    def test_success_exit_stops_before_admission_or_product_comparison(self):
+        # Control-flow stub only: do not fabricate a passed receipt or a binary.
+        with mock.patch.object(BUILDER, "main", return_value=0) as main, \
+                self.assertRaises(SystemExit) as exited:
+            self.execute()
+        self.assertEqual(exited.exception.code, 0)
+        main.assert_called_once_with()
+        self.fetch.assert_called_once()
+        self.build.assert_not_called()
+        self.admission.assert_not_called()
+        self.process.assert_not_called()
+        self.assertEqual(list(self.root.rglob("go-build.json")), [])
+
+    def test_missing_unknown_darwin_or_mismatched_runner_never_builds(self):
+        for runner, system in (("", "Linux"), ("unknown", "Linux"), ("macos-latest", "Darwin"),
+                               ("ubuntu-latest", "Darwin"), ("windows-latest", "Linux"),
+                               ("ubuntu-latest", "Windows")):
+            with self.subTest(runner=runner, system=system), self.assertRaisesRegex(ValueError, "matching Linux/Windows"):
+                self.execute(runner, system)
+            self.fetch.assert_not_called()
+            self.build.assert_not_called()
+            self.process.assert_not_called()
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_unavailable_source_anchor_never_fetches_or_builds(self):
+        with mock.patch.object(BUILDER.skills_reference, "CORRECTED_COMMIT", None), \
+                self.assertRaisesRegex(ValueError, "durable reviewed source commit"):
+            self.execute()
+        self.fetch.assert_not_called()
+        self.build.assert_not_called()
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_repeated_attempt_never_overwrites_prior_evidence(self):
+        with self.assertRaises(SystemExit):
+            self.execute()
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        self.assertTrue(before)
+        with self.assertRaises(FileExistsError):
+            self.execute()
+        self.fetch.assert_not_called()
+        self.build.assert_not_called()
+        self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
+
+    def test_fetch_failure_never_becomes_a_build_receipt(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.execute(fetch_error=subprocess.CalledProcessError(23, ["git", "fetch"]))
+        self.build.assert_not_called()
+        self.process.assert_not_called()
+        self.assertEqual(list(self.root.rglob("go-build.json")), [])
 
 
 if __name__ == "__main__":

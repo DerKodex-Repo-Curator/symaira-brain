@@ -53,10 +53,9 @@ fn control_links_are_refused_but_resource_links_keep_their_confined_owner() {
     )
     .unwrap();
     symlink("manifest.toml", root.path().join("symskills.toml")).unwrap();
-    assert!(
-        load_bundle(root.path()).unwrap_err().to_string().contains(
-            "read symskills.toml: openat symskills.toml: too many levels of symbolic links"
-        )
+    assert_eq!(
+        load_bundle(root.path()).unwrap_err().to_string(),
+        "read symskills.toml: openat symskills.toml: too many levels of symbolic links"
     );
     fs::remove_file(root.path().join("symskills.toml")).unwrap();
     fs::create_dir(root.path().join("assets")).unwrap();

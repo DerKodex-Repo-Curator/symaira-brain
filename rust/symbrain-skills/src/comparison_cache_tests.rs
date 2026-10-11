@@ -2,6 +2,47 @@
 use super::*;
 
 #[test]
+fn codex_comparison_marker_matches_frozen_hash_and_covers_generated_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    let document = b"---\nname: demo\ndescription: bounded fixture\n---\n\nbody\n";
+    std::fs::write(source.join("SKILL.md"), document).unwrap();
+    let bundle = crate::load_bundle(&source).unwrap();
+    let rendered =
+        crate::render::render_target(&bundle, "codex", &crate::render::RenderMetadata::default())
+            .unwrap();
+    let result = cached_comparison(&bundle, &rendered, &temp.path().join("cache")).unwrap();
+    let fingerprint = format!(
+        "{:x}",
+        Sha256::digest([b"SKILL.md\0\0".as_slice(), document, b"\0"].concat())
+    );
+    let expected = format!(
+        "{:x}",
+        Sha256::digest(
+            [
+                fingerprint.as_bytes(),
+                b"\0",
+                &rendered.skill_md,
+                b"\0codex"
+            ]
+            .concat()
+        )
+    );
+    assert_eq!(result.source_hash, expected);
+    let marker: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(result.root.join(".symskills.json")).unwrap())
+            .unwrap();
+    let entries = marker["output_manifest"].as_array().unwrap();
+    let metadata = entries
+        .iter()
+        .find(|entry| entry["path"] == "agents/openai.yaml")
+        .unwrap();
+    let bytes = std::fs::read(result.root.join("agents/openai.yaml")).unwrap();
+    assert_eq!(metadata["sha256"], format!("{:x}", Sha256::digest(bytes)));
+}
+
+#[test]
 fn comparison_cache_validates_repairs_and_preserves_atomic_boundaries() {
     let temp = tempfile::tempdir().expect("owned fixture");
     let source = temp.path().join("source");

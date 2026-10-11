@@ -48,7 +48,12 @@ def environment(root, git):
            "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC",
            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
            "GIT_TERMINAL_PROMPT": "0", "GIT_AUTHOR_DATE": "2020-01-02T03:04:05Z",
-           "GIT_COMMITTER_DATE": "2020-01-02T03:04:05Z"}
+           "GIT_COMMITTER_DATE": "2020-01-02T03:04:05Z",
+           # Cloned fixtures retain size/mtime, but not inode/ctime. Keep Git's
+           # real diff refresh enabled; only its fixture stat checks are pinned.
+           "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "core.trustctime",
+           "GIT_CONFIG_VALUE_0": "false", "GIT_CONFIG_KEY_1": "core.checkstat",
+           "GIT_CONFIG_VALUE_1": "minimal"}
     if os.name == "nt":
         for key in ("SystemRoot", "windir", "ComSpec", "SystemDrive", "PATHEXT"):
             if key in os.environ:
@@ -125,6 +130,11 @@ def setup(root, git, ledger=None):
     for path in sorted(root.rglob("*"), reverse=True):
         if not path.is_symlink():
             os.utime(path, ns=(1893456000000000123, 1577934245000000000))
+    # Prime the real index after the fixed file timestamps, before copying the
+    # seed. Both processes must see identical raw index bytes after read-only
+    # commands, not a copytree-dependent refresh containing fresh inode/ctime.
+    if fixture_command([git, "update-index", "--refresh"], demo, env, ledger).returncode:
+        raise RuntimeError("owned Git fixture stat refresh failed")
     return env, ledger
 
 

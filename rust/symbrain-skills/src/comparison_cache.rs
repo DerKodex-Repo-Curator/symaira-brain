@@ -35,16 +35,9 @@ pub(crate) fn cached_comparison(
     hash.update(&rendered.skill_md);
     hash.update([0]);
     hash.update(rendered.target.as_bytes());
-    if let Some((path, bytes)) = crate::target::generated_metadata(
-        &rendered.target,
-        &rendered.name,
-        &rendered.frontmatter.description,
-    ) {
-        hash.update([0]);
-        hash.update(path.as_bytes());
-        hash.update([0]);
-        hash.update(bytes);
-    }
+    // The frozen Go cache hash predates generated Codex metadata. Its bytes
+    // remain covered by the strict output manifest/digest, not an extra hash
+    // frame which would change the interoperable comparison-cache marker.
     if let Some(variants) = variant_files_hash(&rendered.files) {
         hash.update([0]);
         hash.update(variants.as_bytes());

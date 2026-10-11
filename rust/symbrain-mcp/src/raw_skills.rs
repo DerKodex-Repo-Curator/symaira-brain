@@ -4,6 +4,8 @@ use serde::de::{MapAccess, Visitor};
 use serde_json::value::RawValue;
 use std::fmt;
 
+#[path = "raw_skills_owner.rs"]
+mod owner;
 #[path = "raw_skills_strings.rs"]
 mod strings;
 #[path = "raw_skills_syntax.rs"]
@@ -142,9 +144,11 @@ pub fn raw_skills_params(params: Option<&RawValue>) -> Option<Result<RawSkillsCa
 }
 
 pub(crate) fn transport_request(bytes: &[u8]) -> Option<Result<crate::Request, String>> {
-    // An incomplete suffix may replace any owner field. Without complete
-    // syntax, leave admission and its diagnosis to the inherited parser.
-    syntax::validate(bytes).ok()?;
+    if let Err(error) = syntax::validate(bytes) {
+        // Ownership of an error is not permission to admit a request. The
+        // probe reads all actual frame bytes, including later routing overrides.
+        return (owner::diagnostic_owner(bytes) == owner::Owner::KnownSkills).then_some(Err(error));
+    }
     let repaired = strings::transport(bytes, 2)?;
     let fields = serde_json::from_str::<Fields>(&repaired).ok()?;
     let (mut jsonrpc, mut method, mut params, mut id, mut has_id, mut first) =
@@ -215,3 +219,7 @@ mod boundary_tests;
 #[cfg(test)]
 #[path = "raw_skills_eof_tests.rs"]
 mod eof_tests;
+
+#[cfg(test)]
+#[path = "raw_skills_owner_tests.rs"]
+mod owner_tests;

@@ -2,6 +2,7 @@
 import os
 from cases import TARGETS
 from fixtures import remove_tree
+from ordinary_startup import assert_control_bootstrap
 
 RAW = {"ff": b"\xff", "e282": b"\xe2\x82", "c0af": b"\xc0\xaf", "literal": "\ufffd".encode()}
 BODY = {**RAW, "ordinary": b"ordinary UTF8"}
@@ -129,7 +130,17 @@ def variant(root, env, name):
             else: raise ValueError("unknown byte control variant")
     else: raise ValueError("unknown byte variant")
     for path in [root, *root.rglob("*")]:
-        if not path.is_symlink(): os.utime(path, ns=(1893456000000000123, 1577934245000000000))
+        # Go WalkDir.Info observes a link's own mtime. Pin both native inputs,
+        # keeping links one second newer so following the target still fails.
+        is_link = path.is_symlink()
+        modified = 1577934245000000000 + (1_000_000_000 if is_link else 0)
+        if os.utime in os.supports_follow_symlinks:
+            os.utime(path, ns=(1893456000000000123, modified), follow_symlinks=False)
+        elif is_link:
+            raise NotImplementedError("fixture link timestamps require nofollow os.utime")
+        else:
+            # Windows lacks nofollow utime, even for these known nonlinks.
+            os.utime(path, ns=(1893456000000000123, modified))
     return env
 
 
@@ -164,6 +175,7 @@ def run_controls(report, save, binaries, root, retained, env, invoke, incoming, 
             row["rejected"] = not matched(baseline["go"], row["candidate"], root, True)
             save()
             assert row["rejected"] and row["candidate"]["exit"] == 0, "bootstrap failure cannot pass a byte-owner control"
+            assert_control_bootstrap(baseline["go"], row["candidate"])
             reply = mcp_view(row["candidate"])[1][2]
             if selected:
                 assert reply["result"]["isError"] is True

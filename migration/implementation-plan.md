@@ -1,5 +1,22 @@
 # Symaira Brain Go-to-Rust Migration Implementation Plan
 
+## Current Skills package checkpoint, 2026-10-11
+
+Task t_d390e914 reuses reviewed local candidate149c39e75 rather than rebuilding
+the #834/#835/#856 repairs. Four real Rust startup tests pass on this candidate.
+Fresh Go/Rust startup controls exposed a shared catalog registration-order
+defect when Memory and Skills are enabled together; its correction preserves
+Go's Skills, Usage, Memory, child order instead of sorting the comparator.
+
+The owner approved only volatile Git-index stat differences. SKL-013 and
+`docs/adr/skills-owned-git-index-stat.md` bind this to exact owned restore inputs,
+retain raw index bytes, and reject nonvolatile or unsupported structures.
+Full original cases and controls, strict checks and independent current-source
+review remain required. Linux/Windows native acceptance, #830/#831/#832/#833,
+whole Brain/Browse/Guard, publication and cutover are not complete.
+Current command/exits/artifacts live in the assigned external
+`coordination-20261011/brain/package-handoff.json`.
+
 
 ## Native memory evidence and atomic schema increment — 2026-10-03
 

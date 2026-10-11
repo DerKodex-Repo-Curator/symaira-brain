@@ -1,7 +1,7 @@
 //! Bounded revision extraction and staged restore while retaining .git.
 use crate::{MAX_INPUT_SIZE, MAX_RESOURCE_ENTRIES, MAX_TOTAL_RESOURCE_BYTES, SkillError};
 use cap_std::fs::Dir;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path};
 
 fn local(path: &Path) -> bool {
@@ -86,19 +86,24 @@ pub fn extract(dir: &Path, rev: &str, dst: &Path) -> Result<(), SkillError> {
         if bytes.len() as u64 != size {
             return Err(SkillError("revision archive entry size changed".into()));
         }
-        root.write(&path, &bytes)
-            .map_err(|error| SkillError(error.to_string()))?;
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
         #[cfg(unix)]
         {
-            use cap_std::fs::PermissionsExt;
+            use cap_std::fs::OpenOptionsExt;
             let mode = entry
                 .header()
                 .mode()
                 .map_err(|error| SkillError(error.to_string()))?
                 & 0o777;
-            root.set_permissions(&path, cap_std::fs::Permissions::from_mode(mode))
-                .map_err(|error| SkillError(error.to_string()))?;
+            // Go applies the archive mode on creation, so umask and an existing
+            // file's permissions remain authoritative. A later chmod widened
+            // restored files to Git's 0664 archive mode despite umask 0022.
+            options.mode(mode);
         }
+        root.open_with(&path, &options)
+            .and_then(|mut file| file.write_all(&bytes))
+            .map_err(|error| SkillError(error.to_string()))?;
     }
     Ok(())
 }

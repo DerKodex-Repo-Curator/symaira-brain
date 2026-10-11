@@ -3,6 +3,7 @@ import datetime
 import hashlib
 import json
 import re
+from git_index import INDEX
 
 
 def digest(data):
@@ -16,7 +17,7 @@ def current_timestamp(value, start, end):
 
 
 def filesystem(root, start, end, retained_reads=None):
-    rows, lock_rows, raw = {}, {}, {}
+    rows, lock_rows, raw, indexes = {}, {}, {}, {}
     for area in ("home", "config", "data", "cache", "state", "project", "sources", "owned-git", "alternate-library"):
         for path in sorted((root / area).rglob("*")):
             relative = path.relative_to(root).as_posix()
@@ -37,6 +38,8 @@ def filesystem(root, start, end, retained_reads=None):
             else:
                 data = path.read_bytes()
             raw[relative] = {"sha256": digest(data), "bytes": len(data)}
+            if relative == INDEX:
+                indexes[relative] = data.hex()
             mode = path.stat().st_mode & 0o777
             if re.fullmatch(r"\.symskills-lock-[0-9a-f]{64}", path.name):
                 assert data == b"" and path.is_file(), "SKL004 lock must be a regular empty file"
@@ -57,7 +60,8 @@ def filesystem(root, start, end, retained_reads=None):
                     normalized.append(event)
             rows[relative] = {"type": "file", "mode": mode,
                               "value": normalized if normalized is not None else digest(data)}
-    return {"files": rows, "raw_file_hashes": raw, "validated_skl004_locks": lock_rows}
+    return {"files": rows, "raw_file_hashes": raw, "validated_skl004_locks": lock_rows,
+            "raw_git_indexes": indexes}
 
 
 def cli_view(record, root, rust=False):

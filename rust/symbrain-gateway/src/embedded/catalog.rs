@@ -1,7 +1,7 @@
 #[path = "skills_catalog.rs"]
 mod skills_catalog;
 use crate::Gateway;
-use crate::response::{ListedTool, ToolAnnotations};
+use crate::response::{ListedTool, ToolAnnotations, usage_tool};
 use symbrain_policy::Profile;
 
 pub(crate) const MEMORY_TOOLS: &[&str] = &[
@@ -81,6 +81,13 @@ fn listed(name: &str) -> ListedTool {
 impl Gateway {
     pub(crate) fn embedded_tools(&self) -> Vec<ListedTool> {
         let mut tools = Vec::new();
+        // Preserve ServeIO registration order: Skills, Usage, Memory, children.
+        if self.skills_allowed {
+            tools.extend(self.skills_tool_names.iter().map(|name| listed(name)));
+        }
+        if self.usage_allowed {
+            tools.push(usage_tool());
+        }
         if self.memory.is_some() {
             tools.extend(
                 MEMORY_TOOLS
@@ -97,9 +104,6 @@ impl Gateway {
                     }))
                     .map(|name| listed(name)),
             );
-        }
-        if self.skills_allowed {
-            tools.extend(self.skills_tool_names.iter().map(|name| listed(name)));
         }
         tools
     }

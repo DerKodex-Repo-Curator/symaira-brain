@@ -4,13 +4,22 @@ on:
     branches: [main]
   push:
     branches: [main]
+  # Manual production of review inputs only, never native process acceptance.
+  workflow_dispatch:
+    inputs:
+      build_runner:
+        description: Corrected Go BUILD ONLY (independent receipt review required)
+        required: true
+        type: choice
+        options: [ubuntu-latest, windows-latest]
 permissions:
   contents: read
 concurrency:
-  group: skills-native-${{ github.ref }}
+  group: skills-native-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.build_runner || 'process' }}
   cancel-in-progress: true
 jobs:
   skills-native:
+    if: github.event_name != 'workflow_dispatch'
     name: Skills CLI and eleven MCP tools (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -117,4 +126,72 @@ jobs:
             ${{ runner.temp }}/skills-install-oracle-windows.json
             ${{ runner.temp }}/guard-oracle-windows.json
             ${{ runner.temp }}/guard-doctor-oracle-windows.json
+          if-no-files-found: error
+  corrected-reference-build-only:
+    if: github.event_name == 'workflow_dispatch'
+    name: Corrected Go BUILD ONLY (${{ inputs.build_runner }})
+    runs-on: ${{ inputs.build_runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.7"
+          cache: false
+      - name: Produce corrected reference build only
+        shell: python {0}
+        env:
+          BUILD_RUNNER: ${{ inputs.build_runner }}
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          from contextlib import redirect_stdout, redirect_stderr
+          import os
+          from pathlib import Path
+          import platform
+          import subprocess
+          import sys
+
+          sys.dont_write_bytecode = True
+          sys.path.insert(0, str(Path("scripts/skills-argv-oracle").resolve()))
+          import build_go
+
+          # Do not rebuild the independently approved native131 Darwin oracle.
+          allowed = {"ubuntu-latest": "Linux", "windows-latest": "Windows"}
+          selected = os.environ["BUILD_RUNNER"]
+          if selected not in allowed or allowed[selected] != platform.system():
+              raise ValueError("explicit matching Linux/Windows native build runner required")
+          reference = build_go.CORRECTED
+          build_go.source_commit(reference)
+          anchor = build_go.skills_reference.CORRECTED_ANCHOR
+          owned = Path(os.environ["RUNNER_TEMP"]) / (
+              f"{reference}-build-only-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}")
+          owned.mkdir()  # No overwrite or cleanup of an earlier attempt.
+          for name in ("go-cache", "module-cache"):
+              (owned / name).mkdir()
+          suffix = ".exe" if os.name == "nt" else ""
+          # Resolve the published anchor locally; build_go checks its exact commit
+          # and entire source tree. A source fetch does not admit any receipt.
+          with (owned / "build.stdout.log").open("x") as stdout, (owned / "build.stderr.log").open("x") as stderr:
+              subprocess.run(["git", "fetch", "--no-tags", "origin", f"{anchor}:{anchor}"],
+                             stdout=stdout, stderr=stderr, check=True, timeout=120)
+              sys.argv = ["build_go.py", "--reference", reference, "--prepare-module-cache",
+                          "--out", str(owned / ("symbrain" + suffix)),
+                          "--receipt", str(owned / "go-build.json"),
+                          "--go-cache", str(owned / "go-cache"),
+                          "--module-cache", str(owned / "module-cache")]
+              with redirect_stdout(stdout), redirect_stderr(stderr):
+                  raise SystemExit(build_go.main())
+          # No run.py/comparison/admission here. Independent review and a later
+          # separately reviewed registry change are mandatory before process use.
+      - name: Preserve build-only binary and raw provenance (not parity)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: skills-control-nofollow-v1-build-only-${{ inputs.build_runner }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/skills-control-nofollow-v1-build-only-${{ github.run_id }}-${{ github.run_attempt }}/symbrain*
+            ${{ runner.temp }}/skills-control-nofollow-v1-build-only-${{ github.run_id }}-${{ github.run_attempt }}/go-build.json
+            ${{ runner.temp }}/skills-control-nofollow-v1-build-only-${{ github.run_id }}-${{ github.run_attempt }}/build.*.log
           if-no-files-found: error

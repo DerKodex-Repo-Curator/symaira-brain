@@ -95,7 +95,7 @@ fn read_control(root: &Dir, name: &str, budget: &mut ReadBudget) -> Result<Vec<u
     read_limited_inner(
         root,
         Path::new(name),
-        &format!("read {name}"),
+        name,
         MAX_INPUT_SIZE,
         None,
         Some(budget),

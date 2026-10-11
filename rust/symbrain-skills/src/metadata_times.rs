@@ -64,7 +64,9 @@ pub(super) fn file_timestamp(path: &Path) -> Option<(i64, u32)> {
 }
 
 fn file_mtime(path: &Path) -> Option<i64> {
-    file_timestamp(path).map(|ts| ts.0)
+    // WalkDir.Info in Go describes the entry itself, not a symlink target.
+    // Keep target-following file_timestamp for its separate marker caller.
+    modified_time(&fs::symlink_metadata(path).ok()?).map(|ts| ts.0)
 }
 
 pub(super) fn directory_mtime(path: &Path) -> Option<String> {
