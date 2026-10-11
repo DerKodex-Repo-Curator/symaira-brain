@@ -14,7 +14,7 @@ import tempfile
 
 import skills_reference
 from skills_reference import FROZEN, TOOLCHAIN, HISTORICAL, CORRECTED, REFERENCES, source_commit, require_source
-from compiler_inputs import collect as compiler_inputs
+from compiler_inputs import collect as compiler_inputs, documents
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -136,6 +136,10 @@ def prepare_module_cache(go, git, source, env, report):
         "GOSUMDB": preparation_env["GOSUMDB"],
         "status": "started", "build_network": False}
     run([go, "mod", "download"], preparation_env, report, source, timeout=300)
+    # Lazy loading limits argument-free download to go.mod's requirements.
+    # Warm the full graph's .mod prerequisites here, never in the offline proof.
+    documents(run([go, "list", "-mod=readonly", "-m", "-json", "all"],
+                  preparation_env, report, source, timeout=300))
     rows = source_map(git, source, env, report)
     report["source_after_cache_preparation"] = rows
     if rows != report["source_before"]:

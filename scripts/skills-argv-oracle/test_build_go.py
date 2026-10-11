@@ -32,7 +32,7 @@ class SourceAdmission(unittest.TestCase):
         self.env.update(HOME=str(home), USERPROFILE=str(home), GIT_CONFIG_GLOBAL=os.devnull,
                         GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0")
         self.git = shutil.which("git")
-        self.report = {"commands": []}
+        self.report: dict = {"commands": []}
         self.command("clone", "--shared", "--no-checkout", "--", BUILDER.ROOT, self.source, cwd=None)
         self.command("config", "core.autocrlf", "false")
         self.command("checkout", "--detach", BUILDER.FROZEN)
@@ -71,51 +71,96 @@ class SourceAdmission(unittest.TestCase):
             BUILDER.output_path(BUILDER.ROOT / "never-created-go")
         self.assertEqual(existing.read_bytes(), b"prior immutable payload")
 
-    def preparation(self, download):
+    def preparation(self, graph=None, download=None):
+        # Real corrected Git tree, but explicit Go command doubles only. These
+        # controls do not constitute a cold-cache build or native evidence.
+        self.report["reference"] = BUILDER.CORRECTED
+        self.command("checkout", "--detach", BUILDER.source_commit(BUILDER.CORRECTED))
         self.report["source_before"] = BUILDER.source_map(
             self.git, self.source, self.env, self.report)
-        env = dict(self.env, GOPROXY="off", GOSUMDB="off")
+        env = dict(self.env, GOPROXY="off", GOSUMDB="off", GOENV="off",
+                   GOTOOLCHAIN="local", GOWORK="off")
+        before = env.copy()
+        self.preparation_commands = []
+        expected = [["mod", "download"], ["list", "-mod=readonly", "-m", "-json", "all"]]
         actual_run = BUILDER.run
 
         def command(argv, child_env, report, cwd=None, timeout=120):
             if argv[0] == "unexecuted-go-fixture":
-                self.assertEqual(argv[1:], ["mod", "download"])
+                self.assertEqual(argv[1:], expected[len(self.preparation_commands)])
+                self.preparation_commands.append(argv[1:])
+                self.assertEqual(cwd, self.source)
                 self.assertEqual(timeout, 300)
-                return download(child_env)
+                self.assertEqual(child_env, dict(before, GOPROXY="https://proxy.golang.org",
+                                                 GOSUMDB="sum.golang.org"))
+                if argv[1] == "mod":
+                    return download(child_env) if download else b""
+                return graph(child_env) if graph else b'{"Path":"fixture.invalid/main","Main":true}\n'
+            self.assertEqual(child_env, before)
             return actual_run(argv, child_env, report, cwd, timeout)
 
-        with mock.patch.object(BUILDER, "run", side_effect=command):
-            BUILDER.prepare_module_cache("unexecuted-go-fixture", self.git,
-                                         self.source, env, self.report)
-        self.assertEqual(env["GOPROXY"], "off")
-        self.assertEqual(env["GOSUMDB"], "off")
+        try:
+            with mock.patch.object(BUILDER, "run", side_effect=command):
+                BUILDER.prepare_module_cache("unexecuted-go-fixture", self.git,
+                                             self.source, env, self.report)
+        finally:
+            self.assertEqual(env, before)
+        self.assertEqual(self.preparation_commands, expected)
 
     def test_preparation_keeps_build_environment_offline(self):
-        def download(env):
-            self.assertEqual(env["GOPROXY"], "https://proxy.golang.org")
-            self.assertEqual(env["GOSUMDB"], "sum.golang.org")
-            return b""
-        self.preparation(download)
+        self.preparation()
         self.assertEqual(self.report["module_cache_preparation"]["status"], "passed")
+        self.assertEqual(len(self.report["source_before"]), 2439)
         self.assertEqual(self.report["source_before"],
                          self.report["source_after_cache_preparation"])
 
     def test_preparation_rejects_actual_changed_frozen_source(self):
-        def download(_env):
+        def graph(_env):
             source = self.source / "go.sum"
             source.write_bytes(source.read_bytes() + b"\nactual changed source control\n")
-            return b""
+            return b'{"Path":"fixture.invalid/main","Main":true}\n'
         with self.assertRaisesRegex(ValueError, "bytes.*committed blob"):
-            self.preparation(download)
+            self.preparation(graph=graph)
+        self.assertEqual(self.report["module_cache_preparation"]["status"], "started")
+
+    def test_preparation_rejects_actual_changed_frozen_mode(self):
+        def graph(_env):
+            if os.name == "nt":
+                self.command("update-index", "--chmod=+x", "cmd/symbrain/main.go")
+            else:
+                (self.source / "cmd/symbrain/main.go").chmod(0o600)
+            return b'{"Path":"fixture.invalid/main","Main":true}\n'
+        with self.assertRaisesRegex(ValueError, "permissions.*modes|index.*committed tree"):
+            self.preparation(graph=graph)
+        self.assertEqual(self.report["module_cache_preparation"]["status"], "started")
+
+    def test_preparation_rejects_actual_untracked_source(self):
+        def graph(_env):
+            (self.source / "unexpected.txt").write_text("owned untracked control\n")
+            return b'{"Path":"fixture.invalid/main","Main":true}\n'
+        with self.assertRaisesRegex(ValueError, "must remain clean"):
+            self.preparation(graph=graph)
         self.assertEqual(self.report["module_cache_preparation"]["status"], "started")
 
     def test_preparation_failure_is_not_a_pass(self):
-        def download(_env):
-            raise RuntimeError("owned unexecuted SDK download failed")
-        with self.assertRaisesRegex(RuntimeError, "download failed"):
-            self.preparation(download)
-        self.assertEqual(self.report["module_cache_preparation"]["status"], "started")
-        self.assertNotIn("source_after_cache_preparation", self.report)
+        for phase, count in (("download", 1), ("graph", 2)):
+            for error in ("module lookup failed", "checksum mismatch"):
+                with self.subTest(phase=phase, error=error):
+                    def fail(_env):
+                        raise RuntimeError(error)
+                    with self.assertRaisesRegex(RuntimeError, error):
+                        self.preparation(**{phase: fail})
+                    self.assertEqual(len(self.preparation_commands), count)
+                    self.assertEqual(self.report["module_cache_preparation"]["status"], "started")
+                    self.assertNotIn("source_after_cache_preparation", self.report)
+
+    def test_preparation_rejects_empty_partial_or_error_graph(self):
+        for raw in (b"", b"{", b"[]", b'{"Error":{"Err":"module lookup failed"}}',
+                    b'{"Path":"fixture.invalid/main"}\n{'):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                self.preparation(graph=lambda _env: raw)
+            self.assertEqual(self.report["module_cache_preparation"]["status"], "started")
+            self.assertNotIn("source_after_cache_preparation", self.report)
 
 
 class BuildOnlyWorkflow(unittest.TestCase):
