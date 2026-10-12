@@ -200,11 +200,12 @@ class BuildOnlyWorkflow(unittest.TestCase):
 
     def test_workflow_routes_only_explicit_dispatch_to_build_only(self):
         ordinary, manual = self.workflow.split("  corrected-reference-build-only:\n")
-        self.assertIn("if: github.event_name != 'workflow_dispatch'", ordinary)
-        self.assertIn("if: github.event_name == 'workflow_dispatch'", manual)
+        self.assertIn("if: github.event_name != 'workflow_dispatch' || inputs.mode == 'corrected-process'", ordinary)
+        self.assertIn("if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'build-only' || inputs.mode == '')", manual)
         self.assertIn("options: [ubuntu-latest, windows-latest]", ordinary)
-        self.assertIn("os: [ubuntu-latest, macos-latest, windows-latest]", ordinary)
-        self.assertIn("inputs.build_runner || 'process'", ordinary)
+        self.assertIn("fromJSON(format('[\"{0}\"]', inputs.build_runner))", ordinary)
+        self.assertIn("fromJSON('[\"ubuntu-latest\",\"macos-latest\",\"windows-latest\"]')", ordinary)
+        self.assertIn("format('{0}-{1}', inputs.mode || 'build-only', inputs.build_runner) || 'process'", ordinary)
         self.assertNotIn("continue-on-error", self.workflow)
         self.assertNotIn("strategy:", manual)
         self.assertEqual(manual.count("        run: |"), 1)
@@ -220,7 +221,9 @@ class BuildOnlyWorkflow(unittest.TestCase):
                         "cargo test --locked", "cargo build --locked", "test_fixture_cleanup.py",
                         "test_full_stdout.py", "test_checkpoint.py", "skills-native-oracle/run.py"):
             self.assertIn(command, ordinary)
-        self.assertNotIn("--reference", ordinary)
+        self.assertIn('reference="historical"', ordinary)
+        self.assertIn('if [ "$PROCESS_MODE" = corrected-process ]; then', ordinary)
+        self.assertIn('reference="skills-control-nofollow-v1"', ordinary)
 
     def test_actual_workflow_argv_reaches_builder_but_never_comparisons(self):
         # Two declared runner branches, with the real current-host Path semantics.

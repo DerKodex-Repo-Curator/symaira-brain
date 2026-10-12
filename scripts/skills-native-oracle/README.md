@@ -270,9 +270,10 @@ python3 -B scripts/skills-native-oracle/test_reference_admission.py \
 Use the stable external HOME/XDG/TMP fixture. This calls `admit_receipt`
 directly for the positive case, then rejects test-only mutations of the real
 receipt/binary, the retained historical receipt, a missing receipt and an
-unregistered key before any product invocation. The unregistered-key control
-removes the mapping only inside the test; it does not spoof platform fields or
-claim foreign native execution. Python `-O` and `-OO` must exit 1. Full native
+unregistered key before any product invocation. The optional test-only
+`--routing-key linux/x86_64` or `--routing-key win32/AMD64` explicitly simulates
+routing on the current host, without replacing any trust pin or claiming foreign
+native execution. Python `-O` and `-OO` must exit 1. Full native
 producer execution, the original nine actual controls and strict #834 startup,
 raw-byte and state contracts remain required, as do broader Brain/Browse/Guard
 and release/cutover gates. PR813/source-branch publication remains scheduler-owned.
@@ -356,3 +357,58 @@ with a hard test boundary before SDK execution and only failed test receipts.
 The second exercises the real process entrypoint's missing-platform and
 unreviewed-receipt rejection without executing any product. Simulated platform
 keys and synthetic negative records are unit controls, never native evidence.
+
+## Reviewed Linux/Windows admission and corrected-process source
+
+Independent review147 approved the actual two native Go1.26.7 BUILD_ONLY
+receipts, with SPEC/parity_BUILD_RECEIPT and QUALITY/security_BUILD_RECEIPT
+both APPROVE and zero process comparisons. Its portable `verdict.json` digest is
+`267ba0917072035f2e4ed846d52dcc776c1adc9c11be7ab47f369bb08000ae7f`;
+`artifacts.json` is
+`b3113a1b0d6abb5455e1cbafd760e7d1cb86302d7e082518726c7ccebb1db162`.
+This source delta requires separate SOURCE_ONLY review and admits exactly these
+fixed routing keys:
+
+| Routing key | Run / attempt / job / artifact | Receipt SHA256 |
+|---|---|---|
+| `linux`, `x86_64` | `38186442269` / `1` / `114609664447` / `11719806790` | `02d809361504618991e8c76beed233767a0f883d42764001e9176524261e9ad6` |
+| `win32`, `AMD64` | `38186449761` / `1` / `114609687444` / `11719657439` | `58392844cb3f90d6b9b95961daade3a90c43d72d43f9ad5b147783600fd9f4b8` |
+
+Their GOOS/GOHOSTOS are respectively `linux` and `windows`, with GOARCH and
+GOHOSTARCH both `amd64`. No global platform-name normalization is introduced.
+Both receipts bind the same complete 2439-row corrected tree above, the original
+builder HEAD `578d201f579c45d13af3c076277e87ef8dcf6f74`, and equal before/after
+compiler/module/whole-SDK closures independently verified by review147. The
+receipt pins authenticate those original inventories, not a fresh self-report.
+Darwin's review132 pin, native capture and historical/invalidated data remain
+unchanged. The earlier unregistered-platform paragraphs record prior phases.
+
+The EXISTING `skills-native` job now also accepts one manually selected runner
+with `mode=corrected-process`. It first calls `fetch_reviewed_reference`, which
+uses the runner's existing `gh api` and read-only Actions permission to obtain
+the fixed original run, job, artifact metadata and ZIP. It rejects missing,
+expired, unsuccessful, wrong-attempt/head/repository/ID/URL/digest inputs before
+any product use. ZIP sizes/hashes and binary hashes are fixed in
+`skills_reference.py`; no caller URL, environment pin or rebuild fallback exists.
+Only the four exact ZIP members are written to a fresh runner-temp directory;
+the original receipt and binary bytes are re-admitted by the real `run.py`.
+Raw retrieval exits/outputs and partial process observations are uploaded.
+
+This bounded mode builds only the Rust CLI and Git fixture needed by the
+unchanged producer. It executes all 1112 Unix / 1070 Windows cases, the original
+nine real input negatives and #834 startup controls; no comparator, count or
+security predicate changes. Broader affected package/lint/Guard/coverage/native
+and integration gates remain required separately. It does not rebuild Go or
+duplicate Darwin. BUILD_ONLY remains an explicit separate mode (the default);
+automatic PR/main runs remain three-platform HISTORICAL DIAGNOSTICS, not
+corrected acceptance. There is no additional matrix job.
+
+After independent SOURCE_ONLY review and scheduler-owned publication of this
+exact candidate, the next native invocation is the existing workflow, once per
+selected runner, with `-f mode=corrected-process -f build_runner=ubuntu-latest`
+or `-f mode=corrected-process -f build_runner=windows-latest`. Use the reviewed
+producer ref, retain both complete raw captures, and independently review the
+exact run/head/artifacts before promotion. Expired artifacts are an external
+evidence gate, never permission to regenerate or substitute an unreviewed oracle.
+This source preparation itself executes no native comparisons and grants no
+publication, release, cutover or Go deletion authority.

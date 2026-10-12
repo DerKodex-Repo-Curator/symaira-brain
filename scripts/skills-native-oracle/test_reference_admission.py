@@ -100,8 +100,10 @@ class ReferenceAdmission(unittest.TestCase):
         self.save({**self.historical, "reference": reference.CORRECTED,
                    "frozen": reference.source_commit(reference.CORRECTED)})
         for system, machine, diagnostic in (
-                ("linux", "x86_64", "independently anchored"),
-                ("win32", "AMD64", "independently anchored"),
+                ("linux", "x86_64", "independently reviewed"),
+                ("win32", "AMD64", "independently reviewed"),
+                ("linux", "amd64", "independently anchored"),
+                ("win32", "x86_64", "independently anchored"),
                 ("unknown", "unknown", "independently anchored"),
                 ("darwin", "arm64", "independently reviewed")):
             with self.subTest(system=system), \
@@ -117,6 +119,29 @@ class ReferenceAdmission(unittest.TestCase):
                 process.assert_not_called()
                 self.assertFalse(self.out.exists())
         self.assertEqual(reference.CORRECTED_RECEIPTS, pins)
+
+    def test_reviewed_fetch_rejects_wrong_route_and_missing_artifact(self):
+        # Routing simulation and failed transport only; no synthetic trust pin.
+        for key, approved in reference.REVIEWED_ARTIFACTS.items():
+            with self.subTest(key=key), ExitStack() as stack:
+                stack.enter_context(patch.object(reference.sys, "platform", key[0]))
+                stack.enter_context(patch.object(reference.platform, "machine", return_value=key[1]))
+                request = stack.enter_context(patch.object(subprocess, "run", return_value=
+                    subprocess.CompletedProcess([], 1, b"", b"test-only missing artifact")))
+                owned = self.root / approved["runner"]
+                with self.assertRaisesRegex(ValueError, "matching reviewed"):
+                    reference.fetch_reviewed_reference(owned, "unknown")
+                request.assert_not_called()
+                self.assertFalse(owned.exists())
+                with self.assertRaises(subprocess.CalledProcessError):
+                    reference.fetch_reviewed_reference(owned, approved["runner"])
+                request.assert_called_once_with(
+                    ["gh", "api", "--hostname", "github.com", "--method", "GET",
+                     f"repos/{reference.REPOSITORY}/actions/runs/{approved['run']}"],
+                    capture_output=True, timeout=120, check=False)
+                self.assertEqual((owned / "run.json.exit").read_text(), "1\n")
+                self.assertFalse((owned / "admission.json").exists())
+                self.assertFalse((owned / approved["binary"]).exists())
 
     def test_actual_native_entrypoint_rejects_missing_invalidated_wrong_and_pending(self):
         cases = [(None, reference.HISTORICAL), ({**self.historical, "status": "invalidated"}, reference.HISTORICAL),
@@ -260,15 +285,19 @@ class ReferenceAdmission(unittest.TestCase):
                 pair(*before)
 
 
-def check_reviewed_reference(receipt_path, binary_path, historical_path):
+def check_reviewed_reference(receipt_path, binary_path, historical_path, routing_key=None):
     """Read real retained inputs without invoking a product or changing trust pins."""
     check = unittest.TestCase()
-    digest = "7aaacf61391f4edc0d7ad2f0084f9296d14527f500d8a3923bd569a2f585fb74"
-    check.assertEqual((sys.platform, reference.platform.machine()), ("darwin", "arm64"))
-    check.assertEqual(reference.CORRECTED_RECEIPTS, {("darwin", "arm64"): digest})
+    host = (sys.platform, reference.platform.machine())
+    key = routing_key or host
+    pins = dict(reference.CORRECTED_RECEIPTS)
+    digest = pins[key]
+    check.assertEqual(pins[("darwin", "arm64")], "7aaacf61391f4edc0d7ad2f0084f9296d14527f500d8a3923bd569a2f585fb74")
     raw, binary, historical_raw = [path.read_bytes() for path in (receipt_path, binary_path, historical_path)]
     check.assertEqual(hashlib.sha256(raw).hexdigest(), digest)
-    check.assertEqual(hashlib.sha256(binary).hexdigest(), "7047ca4db34406afedc309e86e0eeb6f6d77d0eaeb50584966ec1f598b4dec86")
+    binary_digest = (reference.REVIEWED_ARTIFACTS[key]["binary_sha256"] if key in reference.REVIEWED_ARTIFACTS
+                     else "7047ca4db34406afedc309e86e0eeb6f6d77d0eaeb50584966ec1f598b4dec86")
+    check.assertEqual(hashlib.sha256(binary).hexdigest(), binary_digest)
     check.assertEqual(hashlib.sha256(historical_raw).hexdigest(), "f30db1ea864907cd6d4b262df2ab31a7011e413d80f6795b5816f663ece423a6")
     original = json.loads(raw)
     rejected = []
@@ -276,6 +305,9 @@ def check_reviewed_reference(receipt_path, binary_path, historical_path):
     # successful execution. Positive admission calls the shared function only.
     with tempfile.TemporaryDirectory(prefix="skills-reviewed-admission-") as temporary, ExitStack() as stack:
         root = Path(temporary)
+        # Explicit routing simulation on this host, NOT foreign native evidence.
+        stack.enter_context(patch.object(reference.sys, "platform", key[0]))
+        stack.enter_context(patch.object(reference.platform, "machine", return_value=key[1]))
         invoke = stack.enter_context(patch.object(run, "invoke", side_effect=AssertionError("product invocation forbidden")))
         setup = stack.enter_context(patch.object(run, "setup", side_effect=AssertionError("fixture setup forbidden")))
         process = stack.enter_context(patch.object(subprocess, "Popen", side_effect=AssertionError("process forbidden")))
@@ -296,12 +328,20 @@ def check_reviewed_reference(receipt_path, binary_path, historical_path):
             rejected.append(name)
 
         changed = root / "test-only-mutated-receipt.json"
-        for name in ("digest", "source_commit", "source_tree", "binary_claim", "invalidated", "historical"):
+        for name in ("digest", "source_commit", "source_tree", "source_after", "binary_claim",
+                     "invalidated", "historical", "toolchain", "compiler", "sdk", "modules", "go_env"):
             row = deepcopy(original)
             if name == "source_commit": row["frozen"] = reference.FROZEN
             elif name == "source_tree": row["source_before"][0]["blob"] = "0" * 40
             elif name == "binary_claim": row["output_sha256"] = "0" * 64
             elif name == "invalidated": row["status"] = "invalidated"
+            elif name == "source_after": row["source_after"] = []
+            elif name == "toolchain": row["toolchain"] = "go0.0.0"
+            elif name in ("compiler", "sdk", "modules", "go_env"):
+                field = {"compiler": "files", "sdk": "sdk_files"}.get(name, name)
+                # Equal but invalid inventories must not bypass the exact pin.
+                row["compiler_inputs_before"][field] = []
+                row["compiler_inputs_after"][field] = []
             payload = raw + b" " if name == "digest" else historical_raw if name == "historical" else json.dumps(row).encode()
             changed.write_bytes(payload)
             refuse(name, changed, binary_path, "independently reviewed native build")
@@ -309,10 +349,9 @@ def check_reviewed_reference(receipt_path, binary_path, historical_path):
         changed_binary.write_bytes(bytes([binary[0] ^ 1]) + binary[1:])
         refuse("binary_bytes", receipt_path, changed_binary, "executable does not match")
         refuse("missing_receipt", root / "absent.json", binary_path, "No such file")
-        # Model only the absence of a reviewed key. Do not spoof the OS/machine
-        # or claim Linux/Windows execution from a Darwin-only admission check.
-        with patch.dict(reference.CORRECTED_RECEIPTS, {}, clear=True):
-            refuse("unregistered_key_test_only", receipt_path, binary_path, "independently anchored native build provenance")
+        refuse("missing_binary", receipt_path, root / "absent-binary", "No such file")
+        with patch.object(reference.platform, "machine", return_value="unsupported-test-only"):
+            refuse("unsupported_routing_key", receipt_path, binary_path, "independently anchored native build provenance")
         invoke.assert_not_called()
         setup.assert_not_called()
         process.assert_not_called()
@@ -326,10 +365,11 @@ def check_reviewed_reference(receipt_path, binary_path, historical_path):
         check.assertIn(b"requires Python assertions enabled", result.stderr)
         optimized.append({"option": option, "exit": result.returncode,
                           "stdout_hex": result.stdout.hex(), "stderr_hex": result.stderr.hex()})
-    check.assertEqual(reference.CORRECTED_RECEIPTS, {("darwin", "arm64"): digest})
+    check.assertEqual(reference.CORRECTED_RECEIPTS, pins)
     for path, before in ((receipt_path, raw), (binary_path, binary), (historical_path, historical_raw)):
         check.assertEqual(path.read_bytes(), before)
     return {"status": "passed", "identity": identity, "admitted": 1, "rejected": rejected,
+            "host": host, "routing_key": key, "routing_simulation": key != host,
             "optimized_rejections": optimized, "product_invocations": 0, "native_parity": False}
 
 
@@ -339,7 +379,11 @@ if __name__ == "__main__":
         parser.add_argument("--reviewed-receipt", type=Path, required=True)
         parser.add_argument("--reviewed-binary", type=Path, required=True)
         parser.add_argument("--historical-receipt", type=Path, required=True)
+        parser.add_argument("--routing-key", choices=("darwin/arm64", "linux/x86_64", "win32/AMD64"),
+                            help="test-only routing simulation; never native execution")
         args = parser.parse_args()
-        print(json.dumps(check_reviewed_reference(args.reviewed_receipt, args.reviewed_binary, args.historical_receipt), indent=2))
+        key = tuple(args.routing_key.split("/")) if args.routing_key else None
+        print(json.dumps(check_reviewed_reference(args.reviewed_receipt, args.reviewed_binary,
+                                                  args.historical_receipt, key), indent=2))
     else:
         unittest.main()
